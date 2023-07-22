@@ -5,7 +5,7 @@
 #include <string>
 #include <thread>
 #include <chrono>
-#include <Windows.h>
+#include <Windows.h> // Protip: windows.h is nicer with https://github.com/microsoft/wil (started as Windows Internal Libraries)
 #include <exception>
 #include <span>
 #include <cstddef>  
@@ -15,6 +15,7 @@
 
 constexpr DWORD SHARED_MEMORY_SIZE = 256;
 constexpr std::size_t RING_BUFFER_SIZE = 100;
+// LPCWSTR is always going to be wchar_t*, but TEXT would make your string a char* if compiling as ANSI. Better use L"Foo".
 constexpr LPCWSTR SHARED_MEMORY_NAME = TEXT("IPSConsumerProducerSharedMemory");
 constexpr LPCWSTR PRODUCER_DID_FINISH = TEXT("ProducerDidFinish");
 constexpr LPCWSTR CONSUMER_DID_FINISH = TEXT("ConsumerDidFinish");
@@ -80,6 +81,7 @@ public:
         {
         case Mode::CREATE: 
         {
+            // Use CreateFileMappingW since your argument is a LPCWSTR or it won't compile in ANSI
             handle = CreateFileMapping(
                 INVALID_HANDLE_VALUE,
                 NULL,
@@ -139,6 +141,7 @@ public:
         return pointer;
     }
 
+    // RValue reference doesn't make sense here, that says that you'll be destroying the caller's span. Byvalue should be fine.
     void read(std::ptrdiff_t offset, std::span<std::byte> &&buffer)
     {
         CopyMemory(buffer.data(), static_cast<std::byte*>(pointer) + offset, buffer.size_bytes());
@@ -155,6 +158,10 @@ private:
     LPVOID pointer;
 };
 
+// Unconstrained element is probably a bad idea,
+// because you won't be running constructors and
+// destructors on both sides, and internal pointers
+// will be in the wrong address space.
 template<typename Element, std::size_t size>
 class RingBuffer
 {
@@ -212,6 +219,8 @@ public:
     bool full() { return count == size; }
 
 private:
+    // Let's hope that both of your processes have been
+    // compiled for the same architecture!
     std::size_t start;
     std::size_t end;
     std::size_t count;
@@ -246,6 +255,7 @@ void producer()
     CheckHandle(ringBufferMutex);
 
     SharedMemory memory(SHARED_MEMORY_NAME, SHARED_MEMORY_SIZE, SharedMemory::Mode::CREATE);
+    // Tricky design since this has a destructor and the size isn't obviously related to SHARED_MEMORY_SIZE
     auto buffer = new (memory.data()) RingBuffer<int, RING_BUFFER_SIZE>();
     int counter = 0;
 
@@ -254,13 +264,21 @@ void producer()
     while (true)
     {
         CheckResult(WaitForSingleObject(consumerDidFinish, INFINITE));
+
+        // That's cheap! You can't race against anything if you lock the whole ring buffer.
+        // The idea was to support concurrent producing/consuming, and I think
+        // you will want semaphores for that.
         CheckResult(WaitForSingleObject(ringBufferMutex, INFINITE));
 
+        // Per standard you might never see the new value of elementsPerTick
+        // since it is set on another thread. This would have to be an std::atomic.
         for (int n = 0; n < elementsPerTick && !buffer->full(); ++n)
         {
             ++counter;
             buffer->push(counter);
             std::cout << "Sent: " << counter << std::endl;
+
+            // The doesn't matter because of the mutex, there's no concurrency :(
             std::this_thread::sleep_for(std::chrono::seconds(sleepDuration));
         }
 
