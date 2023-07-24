@@ -12,14 +12,15 @@
 #include <array>
 #include <cassert>
 #include <memory>
+#include <atomic>
 
 constexpr DWORD SHARED_MEMORY_SIZE = 256;
 constexpr std::size_t RING_BUFFER_SIZE = 100;
-constexpr LPCWSTR SHARED_MEMORY_NAME = TEXT("IPSConsumerProducerSharedMemory");
-constexpr LPCWSTR PRODUCER_DID_FINISH = TEXT("ProducerDidFinish");
-constexpr LPCWSTR CONSUMER_DID_FINISH = TEXT("ConsumerDidFinish");
-constexpr LPCWSTR RING_BUFFER_MUTEX = TEXT("RingBufferMutex");
-int elementsPerTick = 1;
+constexpr LPCWSTR SHARED_MEMORY_NAME = L"IPSConsumerProducerSharedMemory";
+constexpr LPCWSTR PRODUCER_DID_FINISH = L"ProducerDidFinish";
+constexpr LPCWSTR CONSUMER_DID_FINISH = L"ConsumerDidFinish";
+constexpr LPCWSTR RING_BUFFER_MUTEX = L"RingBufferMutex";
+std::atomic<std::uint32_t> elementsPerTick(1);
 constexpr long long sleepDuration = 1;
 
 void CheckResult(BOOL result)
@@ -80,7 +81,7 @@ public:
         {
         case Mode::CREATE: 
         {
-            handle = CreateFileMapping(
+            handle = CreateFileMappingW(
                 INVALID_HANDLE_VALUE,
                 NULL,
                 PAGE_READWRITE,
@@ -94,7 +95,7 @@ public:
         }
         case Mode::OPEN:
         {
-            handle = OpenFileMapping(
+            handle = OpenFileMappingW(
                 FILE_MAP_ALL_ACCESS,
                 FALSE,
                 name
@@ -139,7 +140,7 @@ public:
         return pointer;
     }
 
-    void read(std::ptrdiff_t offset, std::span<std::byte> &&buffer)
+    void read(std::ptrdiff_t offset, std::span<std::byte> &buffer)
     {
         CopyMemory(buffer.data(), static_cast<std::byte*>(pointer) + offset, buffer.size_bytes());
     }
@@ -155,7 +156,7 @@ private:
     LPVOID pointer;
 };
 
-template<typename Element, std::size_t size>
+template<typename Element, std::uint32_t size>
 class RingBuffer
 {
 public:
@@ -172,7 +173,6 @@ public:
 
     ~RingBuffer()
     {
-        std::cout << "~RingBuffer" << std::endl;
         for (auto element : elements)
             element.~Element();
     }
@@ -212,9 +212,9 @@ public:
     bool full() { return count == size; }
 
 private:
-    std::size_t start;
-    std::size_t end;
-    std::size_t count;
+    std::uint32_t start;
+    std::uint32_t end;
+    std::uint32_t count;
     std::array<Element, size> elements;
 };
 
@@ -222,7 +222,7 @@ void producer()
 {
     std::cout << "Running as Producer..." << std::endl;
 
-    HANDLE producerDidFinish = CreateEvent(
+    HANDLE producerDidFinish = CreateEventW(
         NULL,
         FALSE, // manual-reset
         FALSE, // initial state
@@ -230,7 +230,7 @@ void producer()
     );
     CheckHandle(producerDidFinish);
 
-    HANDLE consumerDidFinish = CreateEvent(
+    HANDLE consumerDidFinish = CreateEventW(
         NULL,
         FALSE, // manual-reset
         FALSE, // initial state
@@ -238,7 +238,7 @@ void producer()
     );
     CheckHandle(consumerDidFinish);
 
-    HANDLE ringBufferMutex = CreateMutex(
+    HANDLE ringBufferMutex = CreateMutexW(
         NULL,
         TRUE, // initially owner
         RING_BUFFER_MUTEX
@@ -281,19 +281,19 @@ void consumer()
 
     auto buffer = static_cast<RingBuffer<int, RING_BUFFER_SIZE>*>(memory.data());
 
-    HANDLE producerDidFinish = OpenEvent(
+    HANDLE producerDidFinish = OpenEventW(
         SYNCHRONIZE,
         FALSE, // inherit handle
         PRODUCER_DID_FINISH
     );
 
-    HANDLE consumerDidFinish = OpenEvent(
+    HANDLE consumerDidFinish = OpenEventW(
         EVENT_MODIFY_STATE,
         FALSE, // inherit handle
         CONSUMER_DID_FINISH
     );
 
-    HANDLE ringBufferMutex = OpenMutex(
+    HANDLE ringBufferMutex = OpenMutexW(
         SYNCHRONIZE,
         FALSE, // inherit handle
         RING_BUFFER_MUTEX
@@ -343,7 +343,7 @@ int main()
     }
 
     std::thread worker;
-   
+
     switch (mode)
     {
     case Mode::PRODUCER: worker = std::thread(producer); break;
@@ -353,7 +353,9 @@ int main()
     
     while (true)
     {
-        std::cin >> elementsPerTick;
+        std::uint32_t input;
+        std::cin >> input;
+        elementsPerTick = input;
         std::cout << "Changed elements per tick to: " << elementsPerTick << std::endl;
     }
 }
