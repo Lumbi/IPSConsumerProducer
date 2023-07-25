@@ -157,7 +157,7 @@ private:
     LPVOID pointer;
 };
 
-template<typename Element, std::uint32_t size>
+template<std::uint32_t size>
 class RingBuffer
 {
 public:
@@ -171,26 +171,14 @@ public:
     RingBuffer(RingBuffer&) = delete;
     RingBuffer& operator=(RingBuffer&) = delete;
 
-    ~RingBuffer()
-    {
-        for (auto element : elements)
-            element.~Element();
-    }
-
-    void push(Element &element)
+    void push(std::byte byte)
     {        
         assert(!full());
-
-        std::copy(
-            &element,
-            &element + 1,
-            &elements[end]
-        );
-
+        elements[end] = byte;
         end = (end + 1) % (size + 1);
     }
 
-    Element& front()
+    std::byte front()
     {
         return elements[start];
     }
@@ -198,10 +186,6 @@ public:
     void pop()
     {
         assert(!empty());
-
-        Element& element = elements[start];
-        element.~Element();
-
         start = (start + 1) % (size + 1);
     }
 
@@ -212,7 +196,7 @@ public:
 private:
     std::uint32_t start;
     std::uint32_t end;
-    std::array<Element, size + 1> elements;
+    std::array<std::byte, size + 1> elements;
 };
 
 void producer()
@@ -220,8 +204,8 @@ void producer()
     std::cout << "Running as Producer..." << std::endl;
 
     SharedMemory memory(SHARED_MEMORY_NAME, SHARED_MEMORY_SIZE, SharedMemory::Mode::CREATE);
-    auto buffer = new (memory.data()) RingBuffer<int, RING_BUFFER_SIZE>();
-    int counter = 0;
+    auto buffer = new (memory.data()) RingBuffer<RING_BUFFER_SIZE>();
+    unsigned char counter = 0;
 
     HANDLE ringBufferFillCount = CreateSemaphoreW(
         NULL,
@@ -246,8 +230,8 @@ void producer()
         assert(!buffer->full());
         std::this_thread::sleep_for(std::chrono::milliseconds(sleepDuration));
         ++counter;
-        buffer->push(counter);
-        std::cout << "Produced: " << counter << std::endl;
+        buffer->push(std::byte { counter });
+        std::cout << "Produced: " << static_cast<int>(counter) << std::endl;
 
         CheckResult(ReleaseSemaphore(ringBufferFillCount, 1, NULL));
     }
@@ -262,7 +246,7 @@ void consumer()
  
     SharedMemory memory(SHARED_MEMORY_NAME, SHARED_MEMORY_SIZE, SharedMemory::Mode::OPEN);
 
-    auto buffer = static_cast<RingBuffer<int, RING_BUFFER_SIZE>*>(memory.data());
+    auto buffer = static_cast<RingBuffer<RING_BUFFER_SIZE>*>(memory.data());
 
     HANDLE ringBufferFillCount = OpenSemaphoreW(
         SYNCHRONIZE,
@@ -284,7 +268,7 @@ void consumer()
         std::this_thread::sleep_for(std::chrono::milliseconds(sleepDuration));
         auto next = buffer->front();
         buffer->pop();
-        std::cout << "Consumed: " << next << std::endl;
+        std::cout << "Consumed: " << std::to_integer<int>(next) << std::endl;
 
         CheckResult(ReleaseSemaphore(ringBufferEmptyCount, 1, NULL));
     }
