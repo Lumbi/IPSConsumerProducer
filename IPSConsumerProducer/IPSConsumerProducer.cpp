@@ -19,7 +19,7 @@ constexpr std::size_t RING_BUFFER_SIZE = 100;
 constexpr LPCWSTR SHARED_MEMORY_NAME = L"IPSConsumerProducerSharedMemory";
 constexpr LPCWSTR PRODUCER_DID_FINISH = L"ProducerDidFinish";
 constexpr LPCWSTR CONSUMER_DID_FINISH = L"ConsumerDidFinish";
-constexpr LPCWSTR RING_BUFFER_MUTEX = L"RingBufferMutex";
+constexpr LPCWSTR RING_BUFFER_MUTEX = L"RingBufferMutex"; // Unused
 constexpr LPCWSTR RING_BUFFER_SEMA_EMPTY = L"RingBufferSemaphoreEmpty";
 constexpr LPCWSTR RING_BUFFER_SEMA_FILL = L"RingBufferSemaphorFill";
 std::atomic<long long> sleepDuration(1000);
@@ -189,14 +189,18 @@ public:
         start = (start + 1) % (size + 1);
     }
 
+    // Not legit: you have different processes writing to start and end concurrently,
+    // it's not meaningful to read those values and compare them.
     bool empty() { return start == end; }
 
     bool full() { return end == start - 1; }
 
 private:
+    // It doesn't make sense to have those in the shared memory since there is
+    // currently no way for them to be accessed safely by both processes.
     std::uint32_t start;
     std::uint32_t end;
-    std::array<std::byte, size + 1> elements;
+    std::array<std::byte, size + 1> elements; // Ideally you don't need the +1
 };
 
 void producer()
@@ -249,7 +253,7 @@ void consumer()
     auto buffer = static_cast<RingBuffer<RING_BUFFER_SIZE>*>(memory.data());
 
     HANDLE ringBufferFillCount = OpenSemaphoreW(
-        SYNCHRONIZE,
+        SYNCHRONIZE, // Nicely specific
         FALSE, // inherit handle
         RING_BUFFER_SEMA_FILL
     );
