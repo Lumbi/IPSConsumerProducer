@@ -20,8 +20,9 @@ constexpr LPCWSTR SHARED_MEMORY_NAME = L"IPSConsumerProducerSharedMemory";
 constexpr LPCWSTR PRODUCER_DID_FINISH = L"ProducerDidFinish";
 constexpr LPCWSTR CONSUMER_DID_FINISH = L"ConsumerDidFinish";
 constexpr LPCWSTR RING_BUFFER_MUTEX = L"RingBufferMutex";
-std::atomic<std::uint32_t> elementsPerTick(1);
-constexpr long long sleepDuration = 1;
+constexpr LPCWSTR RING_BUFFER_SEMA_EMPTY = L"RingBufferSemaphoreEmpty";
+constexpr LPCWSTR RING_BUFFER_SEMA_FILL = L"RingBufferSemaphorFill";
+std::atomic<long long> sleepDuration(1000);
 
 void CheckResult(BOOL result)
 {
@@ -163,7 +164,6 @@ public:
     RingBuffer()
         : start(0),
           end(0),
-          count(0),
           elements{}
     {
     }
@@ -179,8 +179,7 @@ public:
 
     void push(Element &element)
     {        
-        assert(count < size);
-        ++count;
+        assert(!full());
 
         std::copy(
             &element,
@@ -188,8 +187,7 @@ public:
             &elements[end]
         );
 
-        end = (end + 1) % size;
-        assert(end != start);
+        end = (end + 1) % (size + 1);
     }
 
     Element& front()
@@ -199,78 +197,63 @@ public:
 
     void pop()
     {
-        assert(count > 0);
-        --count;
+        assert(!empty());
 
-        elements[start].~Element();
+        Element& element = elements[start];
+        element.~Element();
 
-        start = (start + 1) % size;
+        start = (start + 1) % (size + 1);
     }
 
-    bool empty() { return count == 0; }
+    bool empty() { return start == end; }
 
-    bool full() { return count == size; }
+    bool full() { return end == start - 1; }
 
 private:
     std::uint32_t start;
     std::uint32_t end;
-    std::uint32_t count;
-    std::array<Element, size> elements;
+    std::array<Element, size + 1> elements;
 };
 
 void producer()
 {
     std::cout << "Running as Producer..." << std::endl;
 
-    HANDLE producerDidFinish = CreateEventW(
-        NULL,
-        FALSE, // manual-reset
-        FALSE, // initial state
-        PRODUCER_DID_FINISH
-    );
-    CheckHandle(producerDidFinish);
-
-    HANDLE consumerDidFinish = CreateEventW(
-        NULL,
-        FALSE, // manual-reset
-        FALSE, // initial state
-        CONSUMER_DID_FINISH
-    );
-    CheckHandle(consumerDidFinish);
-
-    HANDLE ringBufferMutex = CreateMutexW(
-        NULL,
-        TRUE, // initially owner
-        RING_BUFFER_MUTEX
-    );
-    CheckHandle(ringBufferMutex);
-
     SharedMemory memory(SHARED_MEMORY_NAME, SHARED_MEMORY_SIZE, SharedMemory::Mode::CREATE);
     auto buffer = new (memory.data()) RingBuffer<int, RING_BUFFER_SIZE>();
     int counter = 0;
 
-    CheckResult(ReleaseMutex(ringBufferMutex));
+    HANDLE ringBufferFillCount = CreateSemaphoreW(
+        NULL,
+        0, // initial
+        RING_BUFFER_SIZE, // max
+        RING_BUFFER_SEMA_FILL
+    );
+    CheckHandle(ringBufferFillCount);
+
+    HANDLE ringBufferEmptyCount = CreateSemaphoreW(
+        NULL,
+        RING_BUFFER_SIZE, // initial
+        RING_BUFFER_SIZE, // max
+        RING_BUFFER_SEMA_EMPTY
+    );
+    CheckHandle(ringBufferEmptyCount);
 
     while (true)
     {
-        CheckResult(WaitForSingleObject(consumerDidFinish, INFINITE));
-        CheckResult(WaitForSingleObject(ringBufferMutex, INFINITE));
+        CheckResult(WaitForSingleObject(ringBufferEmptyCount, INFINITE));
 
-        for (int n = 0; n < elementsPerTick && !buffer->full(); ++n)
-        {
-            ++counter;
-            buffer->push(counter);
-            std::cout << "Sent: " << counter << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(sleepDuration));
-        }
+        assert(!buffer->full());
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleepDuration));
+        ++counter;
+        buffer->push(counter);
+        std::cout << "Produced: " << counter << std::endl;
 
-        CheckResult(ReleaseMutex(ringBufferMutex));
-        CheckResult(SetEvent(producerDidFinish));
+        CheckResult(ReleaseSemaphore(ringBufferFillCount, 1, NULL));
     }
 
-    CloseHandle(producerDidFinish);
-    CloseHandle(consumerDidFinish);
-    CloseHandle(ringBufferMutex);
+    CloseHandle(ringBufferFillCount);
+    CloseHandle(ringBufferEmptyCount);
 }
 
 void consumer()
@@ -281,41 +264,29 @@ void consumer()
 
     auto buffer = static_cast<RingBuffer<int, RING_BUFFER_SIZE>*>(memory.data());
 
-    HANDLE producerDidFinish = OpenEventW(
+    HANDLE ringBufferFillCount = OpenSemaphoreW(
         SYNCHRONIZE,
         FALSE, // inherit handle
-        PRODUCER_DID_FINISH
+        RING_BUFFER_SEMA_FILL
     );
 
-    HANDLE consumerDidFinish = OpenEventW(
-        EVENT_MODIFY_STATE,
+    HANDLE ringBufferEmptyCount = OpenSemaphoreW(
+        SEMAPHORE_MODIFY_STATE,
         FALSE, // inherit handle
-        CONSUMER_DID_FINISH
+        RING_BUFFER_SEMA_EMPTY
     );
-
-    HANDLE ringBufferMutex = OpenMutexW(
-        SYNCHRONIZE,
-        FALSE, // inherit handle
-        RING_BUFFER_MUTEX
-    );
-
-    CheckResult(SetEvent(consumerDidFinish));
 
     while (true)
     {
-        CheckResult(WaitForSingleObject(producerDidFinish, INFINITE));
-        CheckResult(WaitForSingleObject(ringBufferMutex, INFINITE));
+        CheckResult(WaitForSingleObject(ringBufferFillCount, INFINITE));
 
-        for (int n = 0; n < elementsPerTick && !buffer->empty(); ++n) 
-        {
-            auto next = buffer->front();
-            buffer->pop();
-            std::cout << "Received: " << next << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(sleepDuration));
-        }
+        assert(!buffer->empty());
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleepDuration));
+        auto next = buffer->front();
+        buffer->pop();
+        std::cout << "Consumed: " << next << std::endl;
 
-        CheckResult(SetEvent(consumerDidFinish));
-        CheckResult(ReleaseMutex(ringBufferMutex));
+        CheckResult(ReleaseSemaphore(ringBufferEmptyCount, 1, NULL));
     }
 }
 
@@ -353,9 +324,9 @@ int main()
     
     while (true)
     {
-        std::uint32_t input;
+        long long input;
         std::cin >> input;
-        elementsPerTick = input;
-        std::cout << "Changed elements per tick to: " << elementsPerTick << std::endl;
+        sleepDuration = input;
+        std::cout << "Sleep: " << sleepDuration << std::endl;
     }
 }
